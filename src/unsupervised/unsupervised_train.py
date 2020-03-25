@@ -36,7 +36,7 @@ parser.add_argument('--step', default=50, type=int, metavar='N',
                     help=' period of learning rate decay.')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=128, type=int,
+parser.add_argument('-b', '--batch-size', default=64, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
 parser.add_argument('--lr', '--learning-rate', default=0.0001, type=float,
                     metavar='LR', help='initial learning rate')
@@ -72,9 +72,9 @@ parser.add_argument('--net', type=str, default='PatchNetUn', choices=models.__al
 ## loss setting
 parser.add_argument('--scale', type=float, default=15)
 parser.add_argument('--mm', type=float, default=0.1, help=' the momentum of the memory')
-parser.add_argument('--ploss', default=2, type=float, help='the weight of the PEDAL loss')
+parser.add_argument('--ploss', default=0, type=float, help='the weight of the PEDAL loss')
 parser.add_argument('--iloss', default=1, type=float, help='the weight of the IFPL loss')
-parser.add_argument('--margin', default=2, type=float, help='the margin of local consistence loss')
+parser.add_argument('--margin', default=1, type=float, help='the margin of local consistence loss')
 ## pretrained model
 parser.add_argument('--pre-name', default=None, type=str, help='use which pretrained model to initialize the model')
 
@@ -258,7 +258,7 @@ def extract():
     model = net(is_for_test=True)
     model = torch.nn.DataParallel(model).cuda()
 
-    checkpoint = torch.load(os.path.join('../../snapshot', args.exp_name, 'checkpoint.pth'))
+    checkpoint = torch.load(os.path.join('../../snapshot', args.exp_name, 'best.pth'))
     args.start_epoch = checkpoint['epoch']
     model.load_state_dict(checkpoint['state_dict'], strict=False)
     print(args.start_epoch)

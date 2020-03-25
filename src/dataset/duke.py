@@ -20,18 +20,24 @@ def is_image_file(filename):
 
 
 def find_classes(dir):
-    images = [d for d in os.listdir(dir)]
+    images = [d for d in os.listdir(dir) if is_image_file(d)]
     images.sort()
     classes = []
+    class_dict = {}
     for i in images:
 
         class_ = i[0:4]
         if class_ not in classes:
             classes.append(class_)
+        # update class_dict
+        if class_ not in class_dict.keys():
+            class_dict[class_] = [i]
+        else:
+            class_dict[class_].append(i)
 
     class_to_idx = {classes[i]: i for i in range(len(classes))}
     assert len(classes) == 702
-    return classes, class_to_idx
+    return classes, class_to_idx, class_dict
 
 
 def find_shared_classes(gallery, query):
@@ -55,11 +61,11 @@ def find_shared_classes(gallery, query):
     classes = list(set(gallery_classes)|set(query_classes))
     class_to_idx = {classes[i]: i for i in range(len(classes))}
 
-
     assert len(query_classes) == 702
     assert len(gallery_classes) == 702+408
     assert len(classes) == 702+408
     return classes, class_to_idx
+
 
 def make_dataset(dir, class_to_idx):
     images = []
@@ -93,8 +99,6 @@ def default_loader(path):
 
 
 class DUKE(data.Dataset):
-
-
     def __init__(self, root='../../data/DukeMTMC-reID', part='train', true_pair = False,
                  loader=default_loader, require_path=False, size=(384,128), pseudo_pair=0):
 
@@ -106,49 +110,42 @@ class DUKE(data.Dataset):
         self.pseudo_pair = pseudo_pair
         self.subset = {'train': 'bounding_box_train',
                        'gallery': 'bounding_box_test',
-                       'query': 'query',
-                       }
+                       'query': 'query'}
 
         if part == 'gallery' or part == 'query':
-            classes, class_to_idx = find_shared_classes(os.path.join(root, self.subset['gallery']),
-                                                        os.path.join(root, self.subset['query']))
+            gallery_path = os.path.join(root, self.subset['gallery'])
+            query_path = os.path.join(root, self.subset['query'])
+            self.classes, self.class_to_idx, self.class_dict = find_shared_classes(gallery_path,
+                                                                                   query_path)
         else:
-            classes, class_to_idx = find_classes(os.path.join(root, self.subset[part]))
+            data_path = os.path.join(root, self.subset[part])
+            self.classes, self.class_to_idx, self.class_dict = find_classes(data_path)
 
         root = os.path.join(root, self.subset[part])
-        imgs = make_dataset(root, class_to_idx)
-        if len(imgs) == 0:
+        self.imgs = make_dataset(root, self.class_to_idx)
+        if len(self.imgs) == 0:
             raise (RuntimeError("Found 0 images in subfolders of: " + root + "\n"
-                                    "Supported image extensions are: " + ",".join(
-                IMG_EXTENSIONS)))
-        length = len(imgs)
-
-        self.transform = transforms.Compose([
-            transforms.Resize(size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+                                    "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
 
         if part == 'train':
             self.transform = transforms.Compose([transforms.RandomHorizontalFlip(),
                                                  transforms.Resize(size),
                                                  transforms.ToTensor(),
                                                  transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                                      std=[0.229, 0.224, 0.225])
-                                                 ])
+                                                                      std=[0.229, 0.224, 0.225])])
+        else:
+            self.transform = transforms.Compose([transforms.Resize(size),
+                                                 transforms.ToTensor(),
+                                                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                                     std=[0.229, 0.224, 0.225])])
 
-        self.imgs = imgs
-        self.classes = classes
-        self.class_to_idx = class_to_idx
-        self.len = len(imgs)
-        self.class_num = len(classes)
+        self.len = len(self.imgs)
+        self.class_num = len(self.classes)
 
 
     def __getitem__(self, index):
 
         path, target, cam = self.imgs[index]
-
 
         img = self.loader(path)
 
@@ -182,7 +179,18 @@ class DUKE(data.Dataset):
 
         return img, target
 
+
     def __len__(self):
         return len(self.imgs)
 
 
+if __name__ == '__main__':
+    data_dir = '/home/b604/a_tyy/Datasets/DukeMTMC-reID/DukeMTMC-reID/'
+    size = (384, 128)
+    ds = DUKE(root=data_dir, part='train', size=size, require_path=True, true_pair=True)
+    print("---classes:", ds.classes)
+    print("---class_to_idx", ds.class_to_idx)
+    print("---class_dict", ds.class_dict)
+    print("---lens:", ds.len)
+    print("---class_num:", ds.class_num)
+    #print("---imgs:", ds.imgs)

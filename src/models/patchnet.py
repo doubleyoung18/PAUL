@@ -1,7 +1,60 @@
 from .resnet import *
+from .resnet_cbam import *
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+
+from .non_local import *
+
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+
+
+        self.localization = nn.Sequential(
+            nn.Conv2d(2048, 4096, kernel_size=3),
+            nn.BatchNorm2d(4096),
+            nn.ReLU(True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        )
+
+
+        self.fc_loc = nn.Sequential(
+            nn.Linear(4096, 512),
+            nn.ReLU(True),
+            nn.Linear(512, 2 * 3 ),
+            # nn.Linear(512, 2 * 3 * 6),
+        )
+
+        self.fc_loc[2].weight.data.zero_()
+        self.fc_loc[2].bias.data = torch.FloatTensor([1, 0, 0, 0, 1, 0])
+
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+
+    def forward(self, x):
+        xs = self.localization(x)
+        xs = F.adaptive_avg_pool2d(xs, (1,1))
+        xs = xs.view(xs.size(0), -1)  #　size(0) = batchsize
+        theta = self.fc_loc(xs)
+        # theta = theta.view(-1, 6, 2, 3)
+        theta = theta.view(-1, 2, 3)
+
+        grid = F.affine_grid(theta, x.size())
+        x = F.grid_sample(x, grid)
+
+        # for i in range(6):
+        #     stripe = theta[:, i, :, :]
+        #     grid = F.affine_grid(stripe, x.size())
+        #     output.append(F.grid_sample(x, grid))
+
+        return x
 
 class PatchGenerator(nn.Module):
     def __init__(self):
@@ -60,7 +113,7 @@ class PatchGenerator(nn.Module):
 
 
 class PatchNet(nn.Module):
-    def __init__(self, class_num=1000, backbone=resnet50, pretrained=True, param_path='../../imagenet_models/resnet50-19c8e357.pth',
+    def __init__(self, class_num=1000, backbone=resnet50_cbam, pretrained=True, param_path='../../imagenet_models/resnet50-19c8e357.pth',
                  is_for_test=False):
         super(PatchNet,self).__init__()
 
@@ -84,6 +137,7 @@ class PatchNet(nn.Module):
 
         # self._init_parameters()
         self.patch_proposal = PatchGenerator()
+        # self.image_proposal = Generator()
 
     def _init_parameters(self):
         for m in self.new.modules():
@@ -97,15 +151,25 @@ class PatchNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
+
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
-        x = self.backbone.maxpool(x)
 
+        # x = self.backbone.ca(x) * x
+        # x = self.backbone.sa(x) * x
+
+        x = self.backbone.maxpool(x)
+        # x = self.Generator()
         x = self.backbone.layer1(x)
         x = self.backbone.layer2(x)
         x = self.backbone.layer3(x)
         x = self.backbone.layer4(x)
+
+        x = self.backbone.ca1(x) * x
+        x = self.backbone.sa1(x) * x
+
+        # x = self.backbone.refine(x)
         patch = self.patch_proposal(x)
 
         assert x.size(2) % self.stripe == 0
@@ -137,7 +201,7 @@ class PatchNet(nn.Module):
 
 
 class PatchNetUn(PatchNet):
-    def __init__(self, class_num=1000, backbone=resnet50, pretrained=False, is_for_test=False,
+    def __init__(self, class_num=1000, backbone=resnet50_cbam, pretrained=True, is_for_test=False,
                  param_path='../../imagenet_models/resnet50-19c8e357.pth'):
         super(PatchNetUn, self).__init__(class_num=class_num, backbone=backbone, param_path=param_path,
                                          pretrained=pretrained, is_for_test=is_for_test)
@@ -158,15 +222,24 @@ class PatchNetUn(PatchNet):
                 {'params': self.patch_proposal.parameters(), 'lr': 0}]
 
     def forward(self, x):
+        # x = self.Generator()
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
+
+        # x = self.ca(x) * x
+        # x = self.sa(x) * x
+
         x = self.backbone.maxpool(x)
 
         x = self.backbone.layer1(x)
         x = self.backbone.layer2(x)
         x = self.backbone.layer3(x)
         x = self.backbone.layer4(x)
+
+        x = self.backbone.ca1(x) * x
+        x = self.backbone.sa1(x) * x
+
         patch = self.patch_proposal(x,)
 
         local_feat_list = []

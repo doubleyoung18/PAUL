@@ -6,6 +6,8 @@ import shutil
 import time
 import warnings
 
+
+
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -14,8 +16,9 @@ import torch.nn.functional as F
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-
+from torch.utils.data.sampler import Sampler
 import sys
+from utils.batch_sampler import BatchSampler
 
 sys.path.append("..")
 
@@ -34,8 +37,14 @@ parser.add_argument('--epochs', default=60, type=int, metavar='4N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=48, type=int,
-                    metavar='N', help='mini-batch size (default: 48)')
+# parser.add_argument('-b', '--batch-size', default=48, type=int,
+#                     metavar='N', help='mini-batch size (default: 48)')
+
+parser.add_argument('--pnum', default=16, type=int,
+                    metavar='N', help='person num')
+parser.add_argument('--inum', default=4, type=int,
+                    metavar='N', help='image num')
+
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -56,22 +65,25 @@ parser.add_argument('-g', '--gpu', type=str, default='0', metavar='G',
 parser.add_argument('-exp', '--exp-name', type=str, default='0000', help='the name of the experiment')
 parser.add_argument('--debug', action='store_true', help='use remote debug', default=False)
 
-
 parser.add_argument('--net', type=str, default='PatchNet', choices=models.__all__, help='nets: ' +' | '.join(models.__all__) +
                                                                                    ' (default: PatchNet)')
-
 ## data setting
 parser.add_argument('--data', choices=dataset.__all__, help='dataset: ' +' | '.join(dataset.__all__) +
-                                                            ' (default: MSMT17Extra)', default='MSMT17Extra')
+                                                            ' (default: MARKET)', default='Market')
 working_dir = os.path.dirname(os.path.abspath(r".."))
 parser.add_argument('--data-dir', type=str, metavar='PATH',
-                        default=os.path.join(working_dir, 'data', 'MSMT17'))
+                        default=os.path.join(working_dir, 'data', 'Market'))
+# parser.add_argument('--data-dir', type=str, metavar='PATH',
+#                         default=os.path.join(working_dir, 'data', 'DukeMTMC-reID'))
+
+# parser.add_argument('--data-dir', type=str, metavar='PATH',
+#                         default=os.path.join(working_dir, 'data', 'MSMT17'))
 parser.add_argument('--height', type=int, default=384)
 parser.add_argument('--width', type=int, default=128)
 ## loss setting
-
+parser.add_argument('--sloss', default=1, type=float, help='the weight of the softmax loss')
 parser.add_argument('--tloss', default=1, type=float, help='the weight of the triplet margin loss')
-parser.add_argument('--margin', default=0.5, type=float, help='the margin of the triplet margin loss')
+parser.add_argument('--margin', default=0.3, type=float, help='the margin of the triplet margin loss')
 
 
 best_prec1 = 0
@@ -81,9 +93,14 @@ print(args)
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 net = models.__dict__[args.net]
 
+
 def main():
 
     global args, best_prec1
+    print(args)
+    if args.evaluate:
+        extract()
+        evaluate.eval_result(exp_name=args.exp_name, data=args.data)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -95,18 +112,24 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    # Data loading code
+    # load dataset
     data = dataset.__dict__[args.data](root=args.data_dir, part='train', size=(args.height, args.width),
                                        require_path=True, true_pair=True)
+
+    sampler = BatchSampler(data, args.pnum, args.inum)
+
     train_loader = torch.utils.data.DataLoader(
         data,
-        batch_size=args.batch_size, shuffle=True,
+        batch_sampler = sampler, 
         num_workers=args.workers, pin_memory=True)
 
 
+    # train_loader = torch.utils.data.DataLoader(
+    #     data,
+    #     batch_size=args.batch_size, shuffle=True,
+    #     num_workers=args.workers, pin_memory=True)
 
     # create models
-
     model = net(class_num=data.class_num)
     model = torch.nn.DataParallel(model).cuda()
 
@@ -126,9 +149,12 @@ def main():
                                  momentum=args.momentum,
                                  weight_decay=args.weight_decay)]
 
+
     lr_scheduler = [EpochBaseLR(optimizer[0], [10, 25, 40], [0, 0, 1e-5, 0], last_epoch=-1), # 35
                     EpochBaseLR(optimizer[1], [40], [0.1, 0.01], last_epoch=-1),
                     EpochBaseLR(optimizer[2], [40], [0.01, 0.001], last_epoch=-1)]
+
+                    
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -146,12 +172,11 @@ def main():
 
     print(model)
 
-
     for epoch in range(args.start_epoch, args.epochs):
 
         for scheduler in lr_scheduler:
             scheduler.step(epoch)
-        print(optimizer)
+        # print(optimizer)
 
         # train for one epoch
         train(train_loader, model, criterion, tl_criterion, optimizer, epoch)
@@ -162,6 +187,9 @@ def main():
             'best_prec1': best_prec1,
         }, exp_name=args.exp_name, is_best=True)
 
+        if (epoch > 10 and epoch % 5 == 0) or epoch in [0, 3, 6, 9, args.epochs - 1]:
+            extract()
+            evaluate.eval_result(exp_name=args.exp_name, data=args.data)
 
 
 def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
@@ -170,7 +198,6 @@ def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
     losses = AverageMeter()
     TLlosses = AverageMeter()
     top1 = AverageMeter()
-
 
     # switch to train mode
     model.train()
@@ -187,7 +214,6 @@ def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
 
         input = torch.cat([input, positive], dim=0)
 
-
         # compute output
         logits_list, feat_list, embedding_list = model(input)
         loss = torch.sum(torch.stack([criterion(logits, target) for logits in logits_list], dim=0))
@@ -199,14 +225,13 @@ def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
         else:
             tl_loss =  args.tloss*tl_criterion(all_feat, target)
 
-        total_loss = loss + tl_loss
+        total_loss = args.sloss*loss + tl_loss
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(logits_list[0], target, topk=(1, 5))
         losses.update(loss.item(), input.size(0))
         TLlosses.update(tl_loss.item(), input.size(0))
         top1.update(prec1[0], input.size(0))
-
 
         # compute gradient and do SGD step
         for o in optimizer:
@@ -229,6 +254,57 @@ def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
                 epoch, i, len(train_loader), batch_time=batch_time,
                 data_time=data_time, loss=losses, TLloss=TLlosses, top1=top1))
 
+
+def extract():
+    model = net(is_for_test=True)
+    model = torch.nn.DataParallel(model).cuda()
+
+    checkpoint = torch.load(os.path.join('../../snapshot', args.exp_name, 'checkpoint.pth'))
+    args.start_epoch = checkpoint['epoch']
+    model.load_state_dict(checkpoint['state_dict'], strict=False)
+    print(args.start_epoch)
+    # switch to evaluate mode
+    model.eval()
+    part = ['query', 'gallery']
+
+    for p in part:
+        # data = dataset.__dict__[args.data](root=args.data_dir, part='train', size=(args.height, args.width),
+        #                                require_path=True, true_pair=True)
+
+        val_loader = torch.utils.data.DataLoader(
+            dataset.__dict__[args.data](part=p,  require_path=True, size=(args.height, args.width)),
+            batch_size=args.pnum*args.inum, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
+
+        with torch.no_grad():
+            paths = []
+            for i, (input, target, path, cam) in enumerate(val_loader):
+                input = input.cuda(non_blocking=True)
+                target = target.cuda(non_blocking=True)
+
+                # compute output
+                feat_list = model(input)
+
+                feat = torch.cat(feat_list, dim=1)
+
+                feature = feat.cpu()
+                target = target.cpu()
+
+                nd_label = target.numpy()
+                nd_feature = feature.numpy()
+                if i == 0:
+                    all_feature = nd_feature
+                    all_label = nd_label
+                    all_cam = cam.numpy()
+                else:
+                    all_feature = numpy.vstack((all_feature, nd_feature))
+                    all_label = numpy.concatenate((all_label, nd_label))
+                    all_cam = numpy.concatenate((all_cam, cam.numpy()))
+                paths.extend(path)
+            all_label.shape = (all_label.size, 1)
+            all_cam.shape = (all_cam.size, 1)
+            print(all_feature.shape, all_label.shape, all_cam.shape)
+            save_feature(p, args.exp_name, args.data, all_feature, all_label, paths, all_cam)
 
 
 if __name__ == '__main__':
