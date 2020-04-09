@@ -3,10 +3,9 @@ import argparse
 import os
 import random
 import shutil
+import sys
 import time
 import warnings
-
-
 
 import torch
 import torch.nn as nn
@@ -16,18 +15,15 @@ import torch.nn.functional as F
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-from torch.utils.data.sampler import Sampler
-import sys
-from utils.batch_sampler import BatchSampler
 
-sys.path.append("..")
-
+from preprocessing.datamanager import ImageDataManager
 import models
 import dataset
 from utils import *
 import evaluate
 import loss
 
+sys.path.append("..")
 
 parser = argparse.ArgumentParser(description='PyTorch Training')
 
@@ -37,14 +33,15 @@ parser.add_argument('--epochs', default=60, type=int, metavar='4N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-# parser.add_argument('-b', '--batch-size', default=48, type=int,
-#                     metavar='N', help='mini-batch size (default: 48)')
-
+parser.add_argument('-s', '--sampler', default='RandomSampler', type=str,
+                    choices=['RandomSampler', 'RandomIdentitySampler'],
+                    help='choose sample method')
+parser.add_argument('-b', '--batch-size', default=48, type=int,
+                    metavar='N', help='mini-batch size (default: 48)')
 parser.add_argument('--pnum', default=16, type=int,
                     metavar='N', help='person num')
 parser.add_argument('--inum', default=4, type=int,
                     metavar='N', help='image num')
-
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -57,7 +54,6 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate models on validation set')
-
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('-g', '--gpu', type=str, default='0', metavar='G',
@@ -65,17 +61,17 @@ parser.add_argument('-g', '--gpu', type=str, default='0', metavar='G',
 parser.add_argument('-exp', '--exp-name', type=str, default='0000', help='the name of the experiment')
 parser.add_argument('--debug', action='store_true', help='use remote debug', default=False)
 
-parser.add_argument('--net', type=str, default='PatchNet', choices=models.__all__, help='nets: ' +' | '.join(models.__all__) +
-                                                                                   ' (default: PatchNet)')
+parser.add_argument('--net', type=str, default='PatchNet', choices=models.__all__,
+                    help='nets: ' + ' | '.join(models.__all__) + ' (default: PatchNet)')
 ## data setting
-parser.add_argument('--data', choices=dataset.__all__, help='dataset: ' +' | '.join(dataset.__all__) +
-                                                            ' (default: MARKET)', default='Market')
+parser.add_argument('--data', choices=dataset.__all__, 
+                    help='dataset: ' + ' | '.join(dataset.__all__) + ' (default: MARKET)', default='Market')
 working_dir = os.path.dirname(os.path.abspath(r".."))
+# TODO update to data_dir choice
 parser.add_argument('--data-dir', type=str, metavar='PATH',
-                        default=os.path.join(working_dir, 'data', 'Market'))
+                        default='/Users/young/Dataset/Market-1501-v15.09.15')
 # parser.add_argument('--data-dir', type=str, metavar='PATH',
 #                         default=os.path.join(working_dir, 'data', 'DukeMTMC-reID'))
-
 # parser.add_argument('--data-dir', type=str, metavar='PATH',
 #                         default=os.path.join(working_dir, 'data', 'MSMT17'))
 parser.add_argument('--height', type=int, default=384)
@@ -85,22 +81,19 @@ parser.add_argument('--sloss', default=1, type=float, help='the weight of the so
 parser.add_argument('--tloss', default=1, type=float, help='the weight of the triplet margin loss')
 parser.add_argument('--margin', default=0.3, type=float, help='the margin of the triplet margin loss')
 
-
 best_prec1 = 0
 args = parser.parse_args()
 sys.stdout = Logger(os.path.join('../../snapshot', args.exp_name))
-print(args)
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 net = models.__dict__[args.net]
 
 
 def main():
-
     global args, best_prec1
     print(args)
-    if args.evaluate:
-        extract()
-        evaluate.eval_result(exp_name=args.exp_name, data=args.data)
+    # if args.evaluate:
+    #     extract()
+    #     evaluate.eval_result(exp_name=args.exp_name, data=args.data)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -113,24 +106,23 @@ def main():
                       'from checkpoints.')
 
     # load dataset
-    data = dataset.__dict__[args.data](root=args.data_dir, part='train', size=(args.height, args.width),
-                                       require_path=True, true_pair=True)
+    datamanager = ImageDataManager(
+        data_dir=args.data_dir,
+        sources='market1501',
+        targets='market1501',
+        height=256,
+        width=128,
+        batch_size_train=32,
+        batch_size_test=100,
+        train_sampler=args.sampler,
+        transforms=['random_flip', 'random_crop']  # TODO varify transform
+    )
+    train_loader = datamanager.train_loader  # TODO combine dataset
+    print('datamanager done')
 
-    sampler = BatchSampler(data, args.pnum, args.inum)
-
-    train_loader = torch.utils.data.DataLoader(
-        data,
-        batch_sampler = sampler, 
-        num_workers=args.workers, pin_memory=True)
-
-
-    # train_loader = torch.utils.data.DataLoader(
-    #     data,
-    #     batch_size=args.batch_size, shuffle=True,
-    #     num_workers=args.workers, pin_memory=True)
-
-    # create models
-    model = net(class_num=data.class_num)
+    # create model
+    class_num = 751  # TODO remove class_num
+    model = net(class_num=class_num)
     model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
@@ -149,12 +141,10 @@ def main():
                                  momentum=args.momentum,
                                  weight_decay=args.weight_decay)]
 
-
-    lr_scheduler = [EpochBaseLR(optimizer[0], [10, 25, 40], [0, 0, 1e-5, 0], last_epoch=-1), # 35
+    lr_scheduler = [EpochBaseLR(optimizer[0], [10, 25, 40], [0, 0, 1e-5, 0], last_epoch=-1),  # 35
                     EpochBaseLR(optimizer[1], [40], [0.1, 0.01], last_epoch=-1),
                     EpochBaseLR(optimizer[2], [40], [0.01, 0.001], last_epoch=-1)]
 
-                    
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -173,14 +163,11 @@ def main():
     print(model)
 
     for epoch in range(args.start_epoch, args.epochs):
-
         for scheduler in lr_scheduler:
             scheduler.step(epoch)
         # print(optimizer)
-
         # train for one epoch
         train(train_loader, model, criterion, tl_criterion, optimizer, epoch)
-
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
@@ -188,7 +175,7 @@ def main():
         }, exp_name=args.exp_name, is_best=True)
 
         if (epoch > 10 and epoch % 5 == 0) or epoch in [0, 3, 6, 9, args.epochs - 1]:
-            extract()
+            extract(datamanager)
             evaluate.eval_result(exp_name=args.exp_name, data=args.data)
 
 
@@ -255,7 +242,7 @@ def train(train_loader, model, criterion, tl_criterion, optimizer, epoch):
                 data_time=data_time, loss=losses, TLloss=TLlosses, top1=top1))
 
 
-def extract():
+def extract(datamanager):
     model = net(is_for_test=True)
     model = torch.nn.DataParallel(model).cuda()
 
@@ -268,13 +255,12 @@ def extract():
     part = ['query', 'gallery']
 
     for p in part:
-        # data = dataset.__dict__[args.data](root=args.data_dir, part='train', size=(args.height, args.width),
-        #                                require_path=True, true_pair=True)
-
-        val_loader = torch.utils.data.DataLoader(
-            dataset.__dict__[args.data](part=p,  require_path=True, size=(args.height, args.width)),
-            batch_size=args.pnum*args.inum, shuffle=False,
-            num_workers=args.workers, pin_memory=True)
+        # TODO update test_loader
+        val_loader = datamanager.test_loader
+        # val_loader = torch.utils.data.DataLoader(
+        #     dataset.__dict__[args.data](part=p, size=(args.height, args.width),require_path=True),
+        #     batch_size=args.pnum*args.inum, shuffle=False,
+        #     num_workers=args.workers, pin_memory=True)
 
         with torch.no_grad():
             paths = []

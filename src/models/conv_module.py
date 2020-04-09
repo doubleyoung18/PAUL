@@ -148,7 +148,6 @@ class ConvModule(nn.Module):
         return getattr(self, self.norm_name)
 
 
-
     def init_weights(self):
         def constant_init(module, val, bias=0):
             nn.init.constant_(module.weight, val)

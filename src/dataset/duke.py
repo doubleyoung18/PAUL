@@ -1,196 +1,53 @@
-import utils.my_transforms as my_transforms
-import torch
+from __future__ import division, print_function, absolute_import
 import re
-import torchvision.transforms as transforms
-import random
-import torch.utils.data as data
-from PIL import Image
-import os
-import os.path
-import time
-import scipy.io as sio
-IMG_EXTENSIONS = [
-    '.jpg', '.JPG', '.jpeg', '.JPEG',
-    '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP', '.mat', '.MAT'
-]
+import glob
+import os.path as osp
+
+from preprocessing.datasets import ImageDataset
 
 
-def is_image_file(filename):
-    return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
+class DUKE(ImageDataset):
+    """DukeMTMC-reID.
 
+    Dataset statistics:
+        - identities: 1404 (train + query).
+        - images:16522 (train) + 2228 (query) + 17661 (gallery).
+        - cameras: 8.
+    """
 
-def find_classes(dir):
-    images = [d for d in os.listdir(dir) if is_image_file(d)]
-    images.sort()
-    classes = []
-    class_dict = {}
-    for i in images:
+    def __init__(self, data_dir='', **kwargs):
+        self.data_dir = data_dir
+        self.train_dir = osp.join(self.data_dir, 'bounding_box_train')
+        self.query_dir = osp.join(self.data_dir, 'query')
+        self.gallery_dir = osp.join(self.data_dir, 'bounding_box_test')
 
-        class_ = i[0:4]
-        if class_ not in classes:
-            classes.append(class_)
-        # update class_dict
-        if class_ not in class_dict.keys():
-            class_dict[class_] = [i]
-        else:
-            class_dict[class_].append(i)
+        required_files = [
+            self.data_dir, self.train_dir, self.query_dir, self.gallery_dir
+        ]
+        self.check_before_run(required_files)
 
-    class_to_idx = {classes[i]: i for i in range(len(classes))}
-    assert len(classes) == 702
-    return classes, class_to_idx, class_dict
+        train = self.process_dir(self.train_dir, relabel=True)
+        query = self.process_dir(self.query_dir, relabel=False)
+        gallery = self.process_dir(self.gallery_dir, relabel=False)
 
+        super(DUKE, self).__init__(train, query, gallery, **kwargs)
 
-def find_shared_classes(gallery, query):
-    gallery_images = [d for d in os.listdir(gallery)]
-    query_images = [d for d in os.listdir(query)]
-    gallery_images.sort()
-    query_images.sort()
+    def process_dir(self, dir_path, relabel=False):
+        img_paths = glob.glob(osp.join(dir_path, '*.jpg'))
+        pattern = re.compile(r'([-\d]+)_c(\d)')
 
-    gallery_classes = []
-    for i in gallery_images:
-        class_ = i[0:4]
-        if class_ not in gallery_classes:
-            gallery_classes.append(class_)
+        pid_container = set()
+        for img_path in img_paths:
+            pid, _ = map(int, pattern.search(img_path).groups())
+            pid_container.add(pid)
+        pid2label = {pid: label for label, pid in enumerate(pid_container)}
 
-    query_classes = []
-    for i in query_images:
-        class_ = i[0:4]
-        if class_ not in query_classes:
-            query_classes.append(class_)
+        data = []
+        for img_path in img_paths:
+            pid, camid = map(int, pattern.search(img_path).groups())
+            assert 1 <= camid <= 8
+            camid -= 1  # index starts from 0
+            if relabel: pid = pid2label[pid]
+            data.append((img_path, pid, camid))
 
-    classes = list(set(gallery_classes)|set(query_classes))
-    class_to_idx = {classes[i]: i for i in range(len(classes))}
-
-    assert len(query_classes) == 702
-    assert len(gallery_classes) == 702+408
-    assert len(classes) == 702+408
-    return classes, class_to_idx
-
-
-def make_dataset(dir, class_to_idx):
-    images = []
-    dir = os.path.expanduser(dir)
-
-    for root, _, fnames in sorted(os.walk(dir)):
-        for fname in sorted(fnames):
-            if "-1" in fname:
-                continue
-            target = fname[0:4]
-            if is_image_file(fname):
-                path = os.path.join(root, fname)
-                cam = int(fname[6])
-                item = (path, class_to_idx[target], cam)
-                images.append(item)
-
-    return images
-
-
-def pil_loader(path):
-    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
-    with open(path, 'rb') as f:
-        with Image.open(f) as img:
-            image = img.convert('RGB')
-            img.close()
-            return image
-
-
-def default_loader(path):
-    return pil_loader(path)
-
-
-class DUKE(data.Dataset):
-    def __init__(self, root='../../data/DukeMTMC-reID', part='train', true_pair = False,
-                 loader=default_loader, require_path=False, size=(384,128), pseudo_pair=0):
-
-        self.root = root
-        self.part = part
-        self.loader = loader
-        self.require_path = require_path
-        self.true_pair = true_pair
-        self.pseudo_pair = pseudo_pair
-        self.subset = {'train': 'bounding_box_train',
-                       'gallery': 'bounding_box_test',
-                       'query': 'query'}
-
-        if part == 'gallery' or part == 'query':
-            gallery_path = os.path.join(root, self.subset['gallery'])
-            query_path = os.path.join(root, self.subset['query'])
-            self.classes, self.class_to_idx, self.class_dict = find_shared_classes(gallery_path,
-                                                                                   query_path)
-        else:
-            data_path = os.path.join(root, self.subset[part])
-            self.classes, self.class_to_idx, self.class_dict = find_classes(data_path)
-
-        root = os.path.join(root, self.subset[part])
-        self.imgs = make_dataset(root, self.class_to_idx)
-        if len(self.imgs) == 0:
-            raise (RuntimeError("Found 0 images in subfolders of: " + root + "\n"
-                                    "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
-
-        if part == 'train':
-            self.transform = transforms.Compose([transforms.RandomHorizontalFlip(),
-                                                 transforms.Resize(size),
-                                                 transforms.ToTensor(),
-                                                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                                      std=[0.229, 0.224, 0.225])])
-        else:
-            self.transform = transforms.Compose([transforms.Resize(size),
-                                                 transforms.ToTensor(),
-                                                transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                                     std=[0.229, 0.224, 0.225])])
-
-        self.len = len(self.imgs)
-        self.class_num = len(self.classes)
-
-
-    def __getitem__(self, index):
-
-        path, target, cam = self.imgs[index]
-
-        img = self.loader(path)
-
-        if self.true_pair:
-            img = self.transform(img)
-            random_index = list(range(self.len))
-            random.shuffle(random_index)
-            for i in random_index:
-                tpath, ttarget, tcam = self.imgs[i]
-                if ttarget ==  target:
-                    timg = self.loader(tpath)
-                    timg = self.transform(timg)
-                    return img, target, path, cam, timg, tcam
-
-        if self.pseudo_pair == 0:
-            img = self.transform(img)
-        else:
-            img_list = [self.transform(img)]
-            generator = transforms.Compose(
-                [
-                 transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                 transforms.RandomRotation(10),
-                 my_transforms.RandomCrop(range=(0.7, 0.95)),
-                 ])
-            for i in range(self.pseudo_pair - 1):
-                img_list.append(self.transform(generator(img)))
-            img = torch.stack(img_list, dim=0)
-
-        if self.require_path:
-            return img, target, path, cam
-
-        return img, target
-
-
-    def __len__(self):
-        return len(self.imgs)
-
-
-if __name__ == '__main__':
-    data_dir = '/home/b604/a_tyy/Datasets/DukeMTMC-reID/DukeMTMC-reID/'
-    size = (384, 128)
-    ds = DUKE(root=data_dir, part='train', size=size, require_path=True, true_pair=True)
-    print("---classes:", ds.classes)
-    print("---class_to_idx", ds.class_to_idx)
-    print("---class_dict", ds.class_dict)
-    print("---lens:", ds.len)
-    print("---class_num:", ds.class_num)
-    #print("---imgs:", ds.imgs)
+        return data
